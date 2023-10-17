@@ -190,6 +190,150 @@ public:
     }
 };
 
+class StandardProblem {
+public:
+    ProblemType type;
+    DegenracyState state;
+    vector<Variable*> variables;
+    vector<Equation> equations;
+    vector<Variable*> bfs;
+    vector<pair<Variable*, float>> delta;
+    vector<float*> ratios;
+    pair<int, int>* pivot_point;
+    Variable* last_left;
+
+    void initialize_delta() {
+        delta.resize(0);
+        for (auto var : variables) delta.push_back({var, 0});
+    }
+
+    virtual void initialize_minratio() = 0;
+    virtual void compute_pivot() = 0;
+
+    void update_degenracy_state() {
+        float delta_min = 1;
+        for (auto d : delta) {
+            if (d.first->state != VariableState::basic) {
+                // cout << "Comparing = " << d.first->name << " = " << d.second << endl;
+                if (delta_min > d.second) delta_min = d.second;
+            }
+        }
+        // cout << "Delta Min = " << delta_min << endl;
+        if (delta_min < 0) {
+            state = DegenracyState::negative_delta;
+        } else if (delta_min == 0) {
+            state = DegenracyState::zero_delta;
+        } else {
+            state = DegenracyState::positive_delta;
+        }
+    }
+
+    void compute_delta() {
+        // delta.resize(variables.size());
+        for (int i = 0; i < variables.size(); i++) {
+            delta[i].second = 0;
+            for (int j = 0; j < equations.size(); j++) {
+                delta[i].second += equations[j].terms[i].second * bfs[j]->weight;
+            }
+            delta[i].second -= variables[i]->weight;
+        }
+        update_degenracy_state();
+    }
+
+    void apply_pivot() {
+        float pivot = equations[pivot_point->second].terms[pivot_point->first].second; 
+        for (auto &t : equations[pivot_point->second].terms) t.second /= pivot;
+        equations[pivot_point->second].constant /= pivot;
+        for (int i = 0; i < equations.size(); i++) {
+            if (i == pivot_point->second) continue;
+            for (int j = 0; j < variables.size(); j++) {
+                if (j == pivot_point->first) continue;
+                equations[i].terms[j].second -= equations[i].terms[pivot_point->first].second *
+                         equations[pivot_point->second].terms[j].second;
+            }
+            equations[i].constant -= equations[i].terms[pivot_point->first].second * equations[pivot_point->second].constant;
+            equations[i].terms[pivot_point->first].second -= equations[i].terms[pivot_point->first].second *
+                         equations[pivot_point->second].terms[pivot_point->first].second;
+        }
+        if (variables[pivot_point->first] == last_left) {
+            state = DegenracyState::degenarate;
+            return;
+        }
+        bfs[pivot_point->second]->state = VariableState::non_basic;
+        last_left = bfs[pivot_point->second];
+        bfs[pivot_point->second] = variables[pivot_point->first];
+        bfs[pivot_point->second]->state = VariableState::basic;
+    }
+
+    void show() {
+        std::ios oldState(nullptr);
+        oldState.copyfmt(std::cout);
+
+        compute_pivot();
+        int n = variables.size();
+        int m = equations.size();
+
+        cout << "\n";
+
+        cout << setw(21) << "cj->";
+        for (auto var: variables) cout << setw(7) <<  var->weight; cout << endl;
+
+        cout << setw(7) << "B/V";
+        cout << setw(7) << "CB";
+
+        cout << setw(7) << "XB";
+        for (auto var: variables) cout << setw(7) <<  var->name;
+        
+        if (ratios.size() == equations.size()) 
+        cout << setw(8) << "XB/Xk"; cout << endl;
+
+        cout << setprecision(4);
+        for (int i = 0; i < m; i++) {
+            cout << setw(7) << bfs[i]->name;
+            cout << setw(7) << bfs[i]->weight;
+            cout << setw(7) << equations[i].constant;
+            for (auto tr: equations[i].terms) cout << setw(7) << tr.second; 
+            if (ratios.size() == equations.size()) {
+                if (ratios[i] != NULL) {
+                    cout << setw(8) << (*ratios[i]) << endl;
+                } else {
+                    cout << setw(8) << "-" << endl;
+                }
+            } else {
+                cout << endl;
+            }
+        }    
+
+        float z = 0;
+        for (int i = 0; i < bfs.size(); i++) z += bfs[i]->weight * equations[i].constant;
+
+        cout << setw(14) << "z = " << setw(7) << left << z;
+        cout << right;
+        for (auto d : delta) cout << setw(7) << d.second; 
+        cout << setw(8) << " <-Delta" << endl;
+
+        if (ratios.size() == variables.size()) {
+            cout << setw(21) << "ratios = ";
+            for (int i = 0; i < variables.size(); i++) {
+                if (ratios[i] != NULL) {
+                    cout << setw(7) << (*ratios[i]);
+                } else {
+                    cout << setw(7) << "-";
+                }
+            }
+            cout << endl;
+        }
+
+
+        if (pivot_point != NULL) {
+            cout << "leaving: " << bfs[pivot_point->second]->name << ", ";
+            cout << "entering: " << variables[pivot_point->first]->name << endl;
+        }
+
+        std::cout.copyfmt(oldState);
+    }
+};
+
 class PrimalStandardProblem : public StandardProblem {
 public:
     PrimalStandardProblem() {
@@ -213,7 +357,6 @@ public:
             }
         }
 
-        bool duplicate = false;
         int s = -1;
         float min_ratio = 1e5;
         compute_ratios(k, -1);
@@ -349,145 +492,83 @@ public:
     }
 
     bool is_valid() {
-
+        for (auto d: delta) if (d.second < 0) return false;
+        return true;
     }
 
     void compute_pivot() {
+        pivot_point = NULL;
+        for (int i = 0; i < ratios.size(); i++) ratios[i] = NULL;
+        compute_delta();
+        if (state == DegenracyState::negative_delta) return;
+        int s = -1;
+        float min_xb = 0;
+        for (int i = 0; i < equations.size(); i++) 
+        if (equations[i].constant < min_xb) {
+            min_xb = equations[i].constant;
+            s = i; 
+        }
+        if (s == -1) return;
 
+        compute_ratios(s);
+
+        int k = -1;
+        float max_ratio = -1e5;
+        for (int i = 0; i < variables.size(); i++) {
+            if (ratios[i] != NULL && ((*ratios[i]) >= max_ratio)) {
+                max_ratio = *ratios[i];
+                k = i; 
+            }
+        }
+
+        if (k == -1) {
+            state = DegenracyState::unbounded;
+            return;
+        }
+
+        pivot_point = new pair<int, int>({k, s});
     }
 
-    void compute_ratios() {
-
+    void compute_ratios(int s) {
+        for (int i = 0; i < variables.size(); i++) {
+            ratios[i] = NULL;
+            if (equations[s].terms[i].second < 0) {
+                ratios[i] = new float(0);
+                *ratios[i] = delta[i].second / equations[s].terms[i].second;
+            }
+        } 
     }
 
     void solve_dual_simplex() {
-
-    }
-};
-
-class StandardProblem {
-public:
-    ProblemType type;
-    DegenracyState state;
-    vector<Variable*> variables;
-    vector<Equation> equations;
-    vector<Variable*> bfs;
-    vector<pair<Variable*, float>> delta;
-    vector<float*> ratios;
-    pair<int, int>* pivot_point;
-    Variable* last_left;
-
-    void initialize_delta() {
-        delta.resize(0);
-        for (auto var : variables) delta.push_back({var, 0});
-    }
-
-    virtual void initialize_minratio() = 0;
-    virtual void compute_pivot() = 0;
-
-    void update_degenracy_state() {
-        float delta_min = 1;
-        for (auto d : delta) {
-            if (d.first->state != VariableState::basic) {
-                // cout << "Comparing = " << d.first->name << " = " << d.second << endl;
-                if (delta_min > d.second) delta_min = d.second;
+        while (true) {
+            show();
+            if (state == DegenracyState::degenarate || pivot_point == NULL) break;
+            apply_pivot();
+        }
+        if (state == DegenracyState::degenarate) {
+            cout << "Degenarate Solution" << endl;
+        } else if (state == DegenracyState::unbounded) {
+            cout << "Unbounded Solution" << endl;
+        } else if (is_valid()) {
+            cout << "Solution: ";
+            float z = 0;
+            for (int i = 0; i < bfs.size(); i++) z += bfs[i]->weight * equations[i].constant;
+            z = type == ProblemType::max ? z : -1 * z;
+            cout << "z=" << z << ", ";
+            for (int i = 0; i < bfs.size(); i++) {
+                if (bfs[i]->type == VariableType::normal) {
+                    cout << bfs[i]->name << "=" << equations[i].constant << ",";
+                }
             }
-        }
-        // cout << "Delta Min = " << delta_min << endl;
-        if (delta_min < 0) {
-            state = DegenracyState::negative_delta;
-        } else if (delta_min == 0) {
-            state = DegenracyState::zero_delta;
-        } else {
-            state = DegenracyState::positive_delta;
-        }
-    }
-
-    void compute_delta() {
-        // delta.resize(variables.size());
-        for (int i = 0; i < variables.size(); i++) {
-            delta[i].second = 0;
-            for (int j = 0; j < equations.size(); j++) {
-                delta[i].second += equations[j].terms[i].second * bfs[j]->weight;
+            for (auto &var : variables) {
+                if (var->type == VariableType::normal && var->state == VariableState::non_basic) {
+                    cout << var->name << "=0,";
+                }
             }
-            delta[i].second -= variables[i]->weight;
+            cout << endl;
+        } else if (pivot_point == NULL) {
+            cout << "Pivot somehow null" << endl;
         }
-        update_degenracy_state();
-    }
-
-    void apply_pivot() {
-        float pivot = equations[pivot_point->second].terms[pivot_point->first].second; 
-        for (auto &t : equations[pivot_point->second].terms) t.second /= pivot;
-        equations[pivot_point->second].constant /= pivot;
-        for (int i = 0; i < equations.size(); i++) {
-            if (i == pivot_point->second) continue;
-            for (int j = 0; j < variables.size(); j++) {
-                if (j == pivot_point->first) continue;
-                equations[i].terms[j].second -= equations[i].terms[pivot_point->first].second *
-                         equations[pivot_point->second].terms[j].second;
-            }
-            equations[i].constant -= equations[i].terms[pivot_point->first].second * equations[pivot_point->second].constant;
-            equations[i].terms[pivot_point->first].second -= equations[i].terms[pivot_point->first].second *
-                         equations[pivot_point->second].terms[pivot_point->first].second;
-        }
-        if (variables[pivot_point->first] == last_left) {
-            state = DegenracyState::degenarate;
-            return;
-        }
-        bfs[pivot_point->second]->state = VariableState::non_basic;
-        last_left = bfs[pivot_point->second];
-        bfs[pivot_point->second] = variables[pivot_point->first];
-        bfs[pivot_point->second]->state = VariableState::basic;
-    }
-
-    void show() {
-        std::ios oldState(nullptr);
-        oldState.copyfmt(std::cout);
-
-        compute_pivot();
-        int n = variables.size();
-        int m = equations.size();
-
-        cout << "\n";
-
-        cout << setw(21) << "cj->";
-        for (auto var: variables) cout << setw(7) <<  var->weight; cout << endl;
-
-        cout << setw(7) << "B/V";
-        cout << setw(7) << "CB";
-
-        cout << setw(7) << "XB";
-        for (auto var: variables) cout << setw(7) <<  var->name;
-        
-        cout << setw(8) << "XB/Xk" << endl; 
-
-        cout << setprecision(4);
-        for (int i = 0; i < m; i++) {
-            cout << setw(7) << bfs[i]->name;
-            cout << setw(7) << bfs[i]->weight;
-            cout << setw(7) << equations[i].constant;
-            for (auto tr: equations[i].terms) cout << setw(7) << tr.second; 
-            if (ratios[i] != NULL) {
-                cout << setw(8) << (*ratios[i]) << endl;
-            } else {
-                cout << setw(8) << "-" << endl;
-            }
-        }
-
-        float z = 0;
-        for (int i = 0; i < bfs.size(); i++) z += bfs[i]->weight * equations[i].constant;
-
-        cout << setw(14) << "z = " << setw(7) << left << z;
-        cout << right;
-        for (auto d : delta) cout << setw(7) << d.second; 
-        cout << setw(8) << " <-Delta" << endl;
-
-        if (pivot_point != NULL) {
-            cout << "leaving: " << bfs[pivot_point->second]->name << ", ";
-            cout << "entering: " << variables[pivot_point->first]->name << endl;
-        }
-
-        std::cout.copyfmt(oldState);
     }
 };
 
@@ -499,19 +580,21 @@ int main() {
     // StandardProblem* problem = convert_problem(read_problem());
     // problem->solve_two_phase();
     Problem problem = read_problem();
-    Problem* dual_problem = problem.dual();
-    problem.show();
-    cout << endl;
-    dual_problem->show();
+    standardize_dual(problem)->solve_dual_simplex();
+    // Problem* dual_problem = problem.dual();
+    // problem.show();
+    // cout << endl;
+    // dual_problem->show();
 
-    standardize(problem)->solve_two_phase();
-    standardize(*dual_problem)->solve_two_phase();
+    // standardize(problem)->solve_two_phase();
+    // standardize(*dual_problem)->solve_two_phase();
     // problem->solve_big_m();
     // problem->show();
 }
 
 DualStandardProblem* standardize_dual(Problem problem) {
     problem.make_primal();
+    problem.show();
     int n = problem.variables.size();
     int m = problem.equations.size();
 
@@ -542,7 +625,6 @@ DualStandardProblem* standardize_dual(Problem problem) {
 
     for (int i = 0; i < m; i++) {
         Equation new_eq = Equation();
-        problem.equations[i].abs_constant();
 
         for (int j = 0; j < problem.variables.size(); j++) {
             new_eq.terms.push_back(problem.equations[i].terms[j]);
